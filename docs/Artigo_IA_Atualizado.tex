@@ -1,0 +1,296 @@
+\documentclass[conference]{IEEEtran}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[brazil]{babel}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{url}
+
+\title{Assistente via Telegram para Consultas Operacionais em Centros de Distribuição: Avaliação de uma Classificação Híbrida de Intenções}
+
+\author{
+\IEEEauthorblockN{Daniel Domiciano Spindola, Gustavo de Oliveira Fusco e João Gabriel Coitinho Bonin}
+\IEEEauthorblockA{Engenharia de Computação, Fundação Hermínio Ometto (FHO)\\
+Araras, Brasil\\
+RA: 115562, 115220 e 115872}
+}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Centros de distribuição mantêm informações sobre embarques, documentos fiscais, agendamentos, pátio e ocorrências em fontes distintas, o que torna consultas operacionais dependentes de pesquisa manual. Este trabalho implementa e avalia um assistente via Telegram que combina regras determinísticas, extração de identificadores e classificação supervisionada de intenções. O ambiente operacional usa quatro bancos SQLite com dados sintéticos. O corpus de desenvolvimento contém 2.000 mensagens, balanceadas em dez classes; o conjunto de teste Out-of-Distribution (OOD) contém 210 mensagens sintéticas, incluindo variações linguísticas e casos dirigidos a regras. Foram comparados Multinomial Naive Bayes, LinearSVC calibrado e Random Forest calibrado com TF-IDF de unigramas e bigramas. O LinearSVC foi selecionado por F1-macro em validação cruzada agrupada. No OOD, o classificador isolado com limiar de confiança 0,55 obteve acurácia de 0,690 e F1-macro de 0,707. O Engine híbrido obteve acurácia de 0,648 e F1-macro de 0,658. Portanto, neste conjunto sintético, os resultados não demonstram vantagem da combinação de regras e modelo sobre o classificador isolado. O estudo entrega um protótipo funcional e reprodutível, mas sua avaliação não substitui testes com mensagens reais e anonimizadas.
+\end{abstract}
+
+\begin{IEEEkeywords}
+classificação de intenções, logística, Telegram, TF-IDF, aprendizado supervisionado, dados sintéticos
+\end{IEEEkeywords}
+
+\section{Introdução}
+
+Centros de distribuição coordenam atividades de transporte, agendamento, entrada de veículos, carregamento, emissão de documentos fiscais e registro de ocorrências. Quando essas informações ficam distribuídas em sistemas diferentes, uma pergunta simples sobre uma carga pode exigir consultas manuais em várias fontes. Isso aumenta o tempo de resposta e o retrabalho de operadores.
+
+Estudos sobre inteligência artificial aplicada à logística discutem a oportunidade de automatizar tarefas e integrar informação operacional \cite{klumpp}. Neste projeto, o problema é delimitado à identificação da intenção de uma mensagem e à recuperação de informações sintéticas já estruturadas. O sistema não gera decisões logísticas nem substitui as fontes de registro.
+
+O objetivo é desenvolver e avaliar um assistente via Telegram que aceite perguntas em linguagem natural e consulte dados de embarque, nota fiscal, agendamento, pátio, ocorrência, estadia e transportadora. Como objetivos específicos, foram definidos: integrar fontes SQLite por identificadores operacionais; comparar três classificadores supervisionados; combinar classificação com regras e extração de entidades; verificar autorização por perfil; e medir o desempenho em um conjunto OOD sintético.
+
+O restante do artigo está organizado da seguinte forma: a Seção II apresenta trabalhos relacionados; a Seção III descreve os dados, a arquitetura e o protocolo experimental; a Seção IV apresenta e discute os resultados; e a Seção V conclui o trabalho, incluindo suas limitações e próximos passos.
+
+\section{Trabalhos Relacionados}
+
+Klumpp discute aplicações de inteligência artificial e digitalização na logística e na gestão de cadeias de suprimentos \cite{klumpp}. Esse trabalho contextualiza a relevância da automação, mas não avalia o fluxo específico de classificação de intenções e consulta transacional desenvolvido aqui.
+
+Minaee et al. revisam métodos de classificação de texto, incluindo abordagens de aprendizado profundo \cite{minaee}. Tais métodos são relevantes para tarefas linguísticas complexas, mas o presente escopo prioriza uma solução compacta, local e orientada a um conjunto limitado de intenções.
+
+Joulin et al. apresentam técnicas eficientes de classificação de texto baseadas em representações de palavras e modelos lineares \cite{joulin}. Essa linha de trabalho motiva a avaliação de classificadores leves em texto esparso, embora seus resultados não sejam diretamente comparáveis aos deste projeto, que usa dados sintéticos logísticos.
+
+Larson et al. introduzem um conjunto de avaliação para classificação de intenções e detecção de mensagens fora de escopo \cite{larson}. O trabalho destaca que reconhecer somente as classes conhecidas não basta para um assistente confiável. Neste projeto, uma classe explícita ``fora de escopo'' e um limiar de confiança tratam esse problema, mas os resultados obtidos mostram que a detecção ainda é limitada.
+
+Em relação a esses trabalhos, a contribuição deste protótipo está na integração ponta a ponta de regras, identificadores, autorização e consultas operacionais via Telegram, com comparação explícita entre o classificador isolado e o Engine híbrido. A avaliação é exploratória e não pretende demonstrar superioridade geral sobre os métodos da literatura.
+
+\section{Metodologia}
+
+\subsection{Problema e ambiente de dados}
+
+O sistema recebe uma mensagem e um identificador de chat, determina se o usuário está autorizado, identifica uma intenção e os dados necessários, consulta as fontes e retorna uma resposta curta. A unidade de classificação é a mensagem textual; a variável-alvo é uma entre dez intenções: \texttt{ajuda}, \texttt{saudacao}, \texttt{fora\_escopo}, \texttt{consultar\_embarque}, \texttt{consultar\_agendamento}, \texttt{consultar\_nota\_fiscal}, \texttt{consultar\_veiculo\_patio}, \texttt{consultar\_ocorrencia}, \texttt{consultar\_estadia} e \texttt{consultar\_transportadora}.
+
+Para evitar o uso de informações corporativas ou pessoais, os registros operacionais são sintéticos e criados por \texttt{scripts/seed\_db.py}. O projeto usa SQLite, não SQL Server. Três arquivos representam fontes operacionais; um quarto arquivo guarda os usuários e a auditoria. As relações são feitas por identificadores de embarque, placa e transportadora.
+
+\begin{table}[t]
+\centering
+\caption{Estrutura e volume inicial dos bancos sintéticos}
+\label{tab:db}
+\scriptsize
+\begin{tabular}{lll}
+\toprule
+Arquivo & Tabelas & Registros gerados \\
+\midrule
+\texttt{tms.db} & transportadoras & 30 \\
+ & embarques & 500 \\
+ & notas fiscais & 1.500 \\
+ & agendamentos & 500 \\
+\texttt{patio.db} & movimentacao & 500 \\
+\texttt{ocorrencias.db} & ocorrencias & 500 \\
+\texttt{app.db} & usuarios & 3 perfis de demonstração \\
+ & auditoria & cresce durante a execução \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Os três perfis armazenados em \texttt{usuarios} são interno, transportadora e motorista. O usuário interno pode consultar todas as operações; uma transportadora fica restrita à própria frota; e um motorista, à placa cadastrada. Os testes usam bancos temporários para não depender dos arquivos locais. O script de geração apaga e recria os bancos do diretório escolhido; portanto, os bancos locais não devem ser regenerados sem backup quando contiverem cadastros ou auditoria que se queira preservar.
+
+\subsection{Corpus e exemplos OOD}
+
+O corpus de desenvolvimento está em \texttt{data/corpus\_dev.csv} e contém as colunas \texttt{text}, \texttt{label} e \texttt{group}. São 2.000 mensagens, com 200 exemplos por classe. Os textos são únicos e cada mensagem tem um único rótulo. O campo \texttt{group} identifica o grupo de templates de origem e é usado para evitar que variantes do mesmo template sejam distribuídas entre treino e validação. A abordagem de classificação supervisionada segue a formulação geral discutida por Kotsiantis \cite{kotsiantis}.
+
+O teste OOD está em \texttt{data/corpus\_ood.csv}. Ele tem 210 mensagens: 200 frases sintéticas com variações de linguagem e dez casos específicos dirigidos às regras, como identificadores isolados. A Tabela~\ref{tab:counts} informa a distribuição exata. Embora os exemplos abaixo sejam mensagens efetivamente presentes no arquivo de teste, eles foram escritos para o experimento; não são transcrições de conversas reais de motoristas ou operadores.
+
+\begin{table}[t]
+\centering
+\caption{Quantidade por classe nos corpora}
+\label{tab:counts}
+\scriptsize
+\begin{tabular}{lrr}
+\toprule
+Classe & Desenvolvimento & OOD \\
+\midrule
+Ajuda & 200 & 21 \\
+Agendamento & 200 & 20 \\
+Embarque & 200 & 22 \\
+Estadia & 200 & 20 \\
+Nota fiscal & 200 & 23 \\
+Ocorrência & 200 & 21 \\
+Transportadora & 200 & 20 \\
+Veículo no pátio & 200 & 21 \\
+Fora de escopo & 200 & 20 \\
+Saudação & 200 & 22 \\
+\midrule
+Total & 2.000 & 210 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table*}[t]
+\centering
+\caption{Exemplos textuais presentes no conjunto OOD}
+\label{tab:ood-examples}
+\scriptsize
+\begin{tabular}{ll}
+\toprule
+Classe & Frase do corpus \\
+\midrule
+Embarque & ``cadê a mercadoria que despacharam'' \\
+Agendamento & ``qual janela deram pro caminhão'' \\
+Nota fiscal & ``o danfe já tá liberado'' \\
+Veículo no pátio & ``a carreta já encostou aí'' \\
+Ocorrência & ``teve algum pepino com essa carga'' \\
+Estadia & ``quanto passou das cinco horas lá'' \\
+Transportadora & ``qual firma pegou esse frete'' \\
+Saudação & ``e aí meu amigo'' \\
+Fora de escopo & ``qual série você recomenda'' \\
+Embarque (regra) & ``status do EMB000010 hj'' \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+\subsection{Pré-processamento e modelos}
+
+O pré-processamento converte o texto para minúsculas, remove acentos com Unidecode e substitui pontuação por espaços, preservando letras e números. Não são aplicados stemming, lematização ou remoção de stopwords. O \texttt{TfidfVectorizer} usa unigramas e bigramas, \texttt{ngram\_range=(1,2)}, para representar palavras e pares de palavras \cite{salton,manning}.
+
+Foram comparados Multinomial Naive Bayes \cite{mccallum}, LinearSVC \cite{cortes,joachims} e Random Forest \cite{breiman}, em pipelines Scikit-Learn \cite{pedregosa}. Os três classificadores foram calibrados com método sigmoide. O GridSearchCV avaliou \texttt{alpha} em \{0,1; 0,5; 1,0\} para Naive Bayes; \texttt{C} em \{0,5; 1,0; 2,0\} para LinearSVC; e número de árvores em \{80; 150\} e profundidade em \{sem limite; 20\} para Random Forest.
+
+\subsection{Arquitetura híbrida}
+
+O adaptador \texttt{python-telegram-bot} trata \texttt{/start}, \texttt{/ajuda} e mensagens de texto. O \texttt{Engine} verifica o chat antes de consultar dados, normaliza palavras-chave, extrai embarque, placa e nota fiscal por expressões regulares e tenta reconhecer transportadoras por correspondência aproximada. Regras e identificadores são usados antes do classificador; saudações não sobrepõem uma intenção operacional identificada.
+
+Quando a mensagem não pode ser resolvida por regras, o modelo retorna a classe mais provável e sua confiança. O limiar foi fixado em 0,55. Abaixo dele, a mensagem é encaminhada ao fluxo de fora de escopo. Se faltar uma entidade necessária, o Engine guarda temporariamente a intenção do mesmo chat por até cinco minutos. Em caso de nomes de transportadoras ambíguos, apresenta opções numeradas e executa a consulta após a escolha.
+
+O Engine aplica autorização às consultas de embarque, agendamento, nota fiscal, pátio, ocorrência, estadia e transportadora. As respostas são formatadas sem Markdown complexo. A auditoria mascara placas, números de notas fiscais e valores tanto na entrada como no resultado armazenado; sua retenção padrão é de 90 dias, configurável. O cálculo demonstrativo de estadia considera cinco horas de tolerância e taxa configurável de R\$ 60,00 por hora excedente. Essa regra é um parâmetro do protótipo, não uma apuração jurídica ou financeira.
+
+\subsection{Protocolo de validação}
+
+A seleção usa F1-macro, que atribui o mesmo peso às classes \cite{sokolova}. O código cria uma partição agrupada treino/validação por \texttt{StratifiedGroupKFold} de cinco folds, com embaralhamento e semente 42; o primeiro fold é reservado para validação. No treino, o GridSearchCV usa uma validação cruzada agrupada de cinco folds, com semente 43, para ajustar hiperparâmetros e selecionar o modelo. O limiar de 0,55 é fixado antes da avaliação OOD. A varredura de limiares é reportada somente na partição de validação. Depois da seleção, o modelo final é ajustado com todo o corpus de desenvolvimento; o OOD é usado apenas para a avaliação final.
+
+No teste OOD são comparados dois fluxos: (1) ML-only, em que o classificador e o limiar produzem a intenção; e (2) híbrido, que executa o mesmo Engine usado pelo CLI e pelo Telegram, com bancos sintéticos temporários. Foram calculadas acurácia, precisão, revocação, F1-macro, taxas de fallback e matrizes de confusão. O protocolo foi executado em Python 3.13.9, com Scikit-Learn 1.9.1 e pandas 2.3.3.
+
+\section{Resultados}
+
+\subsection{Seleção e comparação dos classificadores}
+
+A Tabela~\ref{tab:model-results} apresenta os resultados dos três classificadores. O LinearSVC calibrado foi selecionado por obter o maior F1-macro na validação cruzada agrupada (0,603). A coluna OOD dos modelos apresenta a classificação direta antes da comparação ponta a ponta com o limiar.
+
+\begin{table}[t]
+\centering
+\caption{Resultados dos classificadores}
+\label{tab:model-results}
+\scriptsize
+\begin{tabular}{lrrr}
+\toprule
+Modelo & F1-macro CV & Acurácia OOD & F1-macro OOD \\
+\midrule
+Multinomial Naive Bayes & 0,555 & 0,710 & 0,709 \\
+LinearSVC calibrado & \textbf{0,603} & 0,724 & 0,723 \\
+Random Forest calibrado & 0,568 & 0,648 & 0,658 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Comparação ponta a ponta}
+
+Com o limiar de 0,55, o ML-only obteve acurácia 0,690 e F1-macro 0,707. O Engine híbrido obteve acurácia 0,648 e F1-macro 0,658. O híbrido reduziu de 14,7\% para 9,5\% os casos de mensagens dentro do escopo encaminhadas indevidamente ao fallback, mas aumentou de 45,0\% para 50,0\% as mensagens fora de escopo aceitas como suportadas. Portanto, neste conjunto, a redução de alguns fallbacks não compensou os erros introduzidos pelas regras.
+
+Em uma execução local de 210 mensagens, a latência do Engine foi de 7,580 ms em média e 10,716 ms no percentil 95. Como não houve controle de hardware nem repetição em ambientes distintos, esses valores são apenas uma medição exploratória e não uma garantia de latência em produção.
+
+\subsection{Matrizes de confusão}
+
+Nas Tabelas~\ref{tab:cm-ml} e \ref{tab:cm-hybrid}, as linhas representam a classe real e as colunas, a classe prevista. Os códigos são: AJ (ajuda), AG (agendamento), EMB (embarque), EST (estadia), NF (nota fiscal), OCO (ocorrência), TRA (transportadora), PAT (veículo no pátio), OOS (fora de escopo) e SAU (saudação). A diagonal principal contém os acertos.
+
+\begin{table*}[t]
+\centering
+\caption{Matriz de confusão do ML-only no OOD (limiar 0,55; 210 mensagens)}
+\label{tab:cm-ml}
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrrrr}
+\toprule
+Real $\backslash$ Previsto & AJ & AG & EMB & EST & NF & OCO & TRA & PAT & OOS & SAU \\
+\midrule
+AJ  & 11 & 0 & 5 & 0 & 0 & 1 & 0 & 0 & 4 & 0 \\
+AG  & 0 & 9 & 1 & 1 & 0 & 1 & 1 & 3 & 4 & 0 \\
+EMB & 0 & 0 & 13 & 0 & 0 & 0 & 0 & 1 & 8 & 0 \\
+EST & 0 & 1 & 0 & 15 & 0 & 0 & 0 & 1 & 2 & 1 \\
+NF  & 0 & 0 & 6 & 0 & 16 & 0 & 0 & 0 & 1 & 0 \\
+OCO & 0 & 0 & 1 & 0 & 0 & 16 & 1 & 0 & 3 & 0 \\
+TRA & 0 & 0 & 1 & 0 & 0 & 0 & 17 & 0 & 2 & 0 \\
+PAT & 0 & 0 & 1 & 0 & 0 & 0 & 0 & 19 & 1 & 0 \\
+OOS & 2 & 1 & 2 & 1 & 0 & 0 & 1 & 0 & 11 & 2 \\
+SAU & 1 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 3 & 18 \\
+\bottomrule
+\end{tabular}}
+\end{table*}
+
+\begin{table*}[t]
+\centering
+\caption{Matriz de confusão do Engine híbrido no OOD (210 mensagens)}
+\label{tab:cm-hybrid}
+\scriptsize
+\setlength{\tabcolsep}{4pt}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrrrrr}
+\toprule
+Real $\backslash$ Previsto & AJ & AG & EMB & EST & NF & OCO & TRA & PAT & OOS & SAU \\
+\midrule
+AJ  & 11 & 0 & 5 & 0 & 0 & 1 & 0 & 0 & 4 & 0 \\
+AG  & 0 & 8 & 2 & 1 & 0 & 1 & 0 & 5 & 3 & 0 \\
+EMB & 0 & 0 & 17 & 0 & 0 & 0 & 0 & 1 & 4 & 0 \\
+EST & 0 & 2 & 0 & 13 & 0 & 0 & 0 & 2 & 2 & 1 \\
+NF  & 0 & 0 & 8 & 0 & 15 & 0 & 0 & 0 & 0 & 0 \\
+OCO & 0 & 0 & 5 & 0 & 0 & 13 & 1 & 0 & 2 & 0 \\
+TRA & 0 & 0 & 7 & 0 & 0 & 0 & 11 & 1 & 1 & 0 \\
+PAT & 0 & 1 & 1 & 0 & 0 & 0 & 0 & 19 & 0 & 0 \\
+OOS & 3 & 1 & 2 & 1 & 0 & 0 & 1 & 0 & 10 & 2 \\
+SAU & 1 & 0 & 0 & 0 & 0 & 0 & 0 & 0 & 2 & 19 \\
+\bottomrule
+\end{tabular}}
+\end{table*}
+
+\subsection{Análise}
+
+O híbrido acertou mais mensagens de embarque do que o ML-only (17 contra 13), mas passou a classificar como embarque sete mensagens que pertenciam à classe transportadora; também confundiu notas fiscais e ocorrências com embarques. A classe fora de escopo teve precisão 0,36, revocação 0,50 e F1-score 0,42 no Engine. Isso significa que metade das 20 mensagens OOD dessa classe não foi reconhecida como fora de escopo. A matriz confirma que a detecção de mensagens não suportadas continua sendo uma limitação.
+
+Os resultados não comprovam que as regras determinísticas melhoram o desempenho global. Elas são importantes para resolver identificadores e consultas diretas, mas sua prioridade pode produzir erros de intenção em frases ambíguas. A comparação deve ser interpretada com cautela: o OOD tem somente 210 exemplos, é sintético e foi criado pelos próprios autores. Frases com gírias demonstram variedade textual, mas não substituem dados coletados de usuários ou de uma plataforma institucional.
+
+\section{Conclusão}
+
+Foi implementado um protótipo que recebe mensagens pelo Telegram, classifica dez intenções, extrai identificadores, consulta quatro arquivos SQLite e aplica autorização por perfil. Também foram implementados contexto temporário para perguntas incompletas e escolha de transportadora ambígua, cálculo demonstrativo de estadia e auditoria com mascaramento e retenção.
+
+Os objetivos de integração e implementação foram atingidos no ambiente simulado. Entretanto, a tese de que o híbrido melhora a classificação não foi confirmada: no OOD avaliado, o Engine híbrido ficou abaixo do ML-only em acurácia e F1-macro. O resultado atende à necessidade de avaliar a hipótese sem forçar uma conclusão positiva.
+
+As principais limitações são a origem inteiramente sintética dos dados, a pequena dimensão do teste OOD, a baixa detecção de mensagens fora de escopo e a ausência de validação com usuários. Trabalhos futuros devem coletar mensagens reais com autorização e anonimização, documentar sua origem, separar os dados por sessão ou usuário, ampliar o teste independente e revisar as regras que causaram confusão entre embarque, nota fiscal e transportadora. O cálculo de estadia também precisa ser validado por responsáveis operacionais antes de qualquer uso real.
+
+\begin{thebibliography}{13}
+
+\bibitem{klumpp}
+M. Klumpp et al., ``Artificial intelligence for logistics and supply chain management,'' in \emph{Digitalization in Supply Chain Management and Logistics}, 2021, pp. 1--25.
+
+\bibitem{minaee}
+S. Minaee et al., ``Deep learning based text classification: A comprehensive review,'' \emph{ACM Computing Surveys}, vol. 54, no. 3, pp. 1--40, 2021.
+
+\bibitem{joulin}
+A. Joulin, E. Grave, P. Bojanowski, and T. Mikolov, ``Bag of tricks for efficient text classification,'' in \emph{Proc. 15th Conference of the European Chapter of the Association for Computational Linguistics}, 2017, pp. 427--431.
+
+\bibitem{larson}
+S. Larson et al., ``An evaluation dataset for intent classification and out-of-scope prediction,'' in \emph{Proc. Conference on Empirical Methods in Natural Language Processing and the 9th International Joint Conference on Natural Language Processing}, 2019.
+
+\bibitem{kotsiantis}
+S. B. Kotsiantis, ``Supervised machine learning: A review of classification techniques,'' \emph{Informatica}, vol. 31, no. 3, pp. 249--268, 2007.
+
+\bibitem{salton}
+G. Salton and C. Buckley, ``Term-weighting approaches in automatic text retrieval,'' \emph{Information Processing \& Management}, vol. 24, no. 5, pp. 513--523, 1988.
+
+\bibitem{manning}
+C. D. Manning, P. Raghavan, and H. Schütze, \emph{Introduction to Information Retrieval}. Cambridge, U.K.: Cambridge University Press, 2008.
+
+\bibitem{mccallum}
+A. McCallum and K. Nigam, ``A comparison of event models for naive Bayes text classification,'' in \emph{AAAI-98 Workshop on Learning for Text Categorization}, 1998, pp. 41--48.
+
+\bibitem{cortes}
+C. Cortes and V. Vapnik, ``Support-vector networks,'' \emph{Machine Learning}, vol. 20, pp. 273--297, 1995.
+
+\bibitem{joachims}
+T. Joachims, ``Text categorization with support vector machines: Learning with many relevant features,'' in \emph{Proc. European Conference on Machine Learning}, 1998, pp. 137--142.
+
+\bibitem{breiman}
+L. Breiman, ``Random forests,'' \emph{Machine Learning}, vol. 45, no. 1, pp. 5--32, 2001.
+
+\bibitem{pedregosa}
+F. Pedregosa et al., ``Scikit-learn: Machine learning in Python,'' \emph{Journal of Machine Learning Research}, vol. 12, pp. 2825--2830, 2011.
+
+\bibitem{sokolova}
+M. Sokolova and G. Lapalme, ``A systematic analysis of performance measures for classification tasks,'' \emph{Information Processing \& Management}, vol. 45, no. 4, pp. 427--437, 2009.
+
+\end{thebibliography}
+
+\end{document}
